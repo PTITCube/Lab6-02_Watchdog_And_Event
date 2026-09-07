@@ -1,30 +1,14 @@
 #include "Camera.h"
 #include <SD_MMC.h>
-#include <esp_camera.h>
 
-#define CAMERA_MODEL_AI_THINKER
-
-#define PWDN_GPIO_NUM     32
-#define RESET_GPIO_NUM    -1
-#define XCLK_GPIO_NUM      0
-#define SIOD_GPIO_NUM     26
-#define SIOC_GPIO_NUM     27
-#define Y9_GPIO_NUM       35
-#define Y8_GPIO_NUM       34
-#define Y7_GPIO_NUM       39
-#define Y6_GPIO_NUM       36
-#define Y5_GPIO_NUM       21
-#define Y4_GPIO_NUM       19
-#define Y3_GPIO_NUM       18
-#define Y2_GPIO_NUM        5
-#define VSYNC_GPIO_NUM    25
-#define HREF_GPIO_NUM     23
-#define PCLK_GPIO_NUM     22
-
-PTIT_Camera::PTIT_Camera() : gpsSelectPin(12), camSelectPin(14), cameraReady(false), sdReady(false) {
+PTIT_Camera::PTIT_Camera() : gpsSelectPin(12), camSelectPin(14), sdReady(false) {
 }
 
 bool PTIT_Camera::initializeSd() {
+    // Nếu thẻ nhớ đã khởi tạo thành công trước đó, không cần khởi tạo lại
+    if (sdReady) return true;
+    
+    // Đảm bảo chân CS của mạch không xung đột (nếu dùng chung SPI, tuy nhiên SD_MMC dùng các chân cố định)
     if (!SD_MMC.begin("/sdcard", true)) {
         Serial.println("[Camera] MicroSD mount failed");
         sdReady = false;
@@ -36,44 +20,6 @@ bool PTIT_Camera::initializeSd() {
     return true;
 }
 
-bool PTIT_Camera::initializeCamera() {
-    camera_config_t config;
-    config.ledc_channel = LEDC_CHANNEL_0;
-    config.ledc_timer = LEDC_TIMER_0;
-    config.pin_d0 = Y2_GPIO_NUM;
-    config.pin_d1 = Y3_GPIO_NUM;
-    config.pin_d2 = Y4_GPIO_NUM;
-    config.pin_d3 = Y5_GPIO_NUM;
-    config.pin_d4 = Y6_GPIO_NUM;
-    config.pin_d5 = Y7_GPIO_NUM;
-    config.pin_d6 = Y8_GPIO_NUM;
-    config.pin_d7 = Y9_GPIO_NUM;
-    config.pin_xclk = XCLK_GPIO_NUM;
-    config.pin_pclk = PCLK_GPIO_NUM;
-    config.pin_vsync = VSYNC_GPIO_NUM;
-    config.pin_href = HREF_GPIO_NUM;
-    config.pin_sccb_sda = SIOD_GPIO_NUM;
-    config.pin_sccb_scl = SIOC_GPIO_NUM;
-    config.pin_pwdn = PWDN_GPIO_NUM;
-    config.pin_reset = RESET_GPIO_NUM;
-    config.xclk_freq_hz = 20000000;
-    config.pixel_format = PIXFORMAT_JPEG;
-    config.frame_size = FRAMESIZE_VGA;
-    config.jpeg_quality = 12;
-    config.fb_count = 2;
-
-    esp_err_t err = esp_camera_init(&config);
-    if (err != ESP_OK) {
-        Serial.printf("[Camera] Camera init failed with error 0x%x\n", err);
-        cameraReady = false;
-        return false;
-    }
-
-    cameraReady = true;
-    Serial.println("[Camera] ESP32-CAM initialized");
-    return true;
-}
-
 bool PTIT_Camera::init(uint8_t gpsSelectPin, uint8_t camSelectPin) {
     this->gpsSelectPin = gpsSelectPin;
     this->camSelectPin = camSelectPin;
@@ -82,63 +28,35 @@ bool PTIT_Camera::init(uint8_t gpsSelectPin, uint8_t camSelectPin) {
         pinMode(this->gpsSelectPin, OUTPUT);
         pinMode(this->camSelectPin, OUTPUT);
         digitalWrite(this->gpsSelectPin, LOW);
-        digitalWrite(this->camSelectPin, HIGH);
+        digitalWrite(this->camSelectPin, HIGH); // Mặc định mở kênh Camera
     }
 
-    Serial.println("[Camera] Switching UART2 to ESP32-CAM...");
+    Serial.println("[Camera] Khởi tạo giao tiếp Master-Slave với ESP32-CAM (UART2)...");
+    Serial2.begin(115200, SERIAL_8N1, 16, 17); // Mở cổng Serial2 để giao tiếp với ESP32-CAM
 
-    initializeSd();
-    return initializeCamera();
+    return initializeSd();
 }
 
 void PTIT_Camera::selectGPS() {
-    digitalWrite(gpsSelectPin, HIGH);
-    digitalWrite(camSelectPin, LOW);
+    if (gpsSelectPin != 255 && camSelectPin != 255) {
+        digitalWrite(gpsSelectPin, HIGH);
+        digitalWrite(camSelectPin, LOW);
+        // Trả lại cấu hình UART cho GPS
+        Serial2.begin(9600, SERIAL_8N1, 16, 17);
+    }
 }
 
 void PTIT_Camera::selectCamera() {
-    digitalWrite(gpsSelectPin, LOW);
-    digitalWrite(camSelectPin, HIGH);
+    if (gpsSelectPin != 255 && camSelectPin != 255) {
+        digitalWrite(gpsSelectPin, LOW);
+        digitalWrite(camSelectPin, HIGH);
+        // Đặt lại cấu hình UART cho Camera
+        Serial2.begin(115200, SERIAL_8N1, 16, 17);
+    }
 }
 
 bool PTIT_Camera::isReady() const {
-    return cameraReady && sdReady;
-}
-
-static bool saveFrameToSd(const camera_fb_t* fb, const char* path) {
-    if (fb == nullptr) {
-        Serial.println("[Camera] Cannot save image: frame unavailable");
-        return false;
-    }
-
-    String filePath = path;
-    int lastSlash = filePath.lastIndexOf('/');
-    if (lastSlash > 0) {
-        String dirPath = filePath.substring(0, lastSlash);
-        if (!SD_MMC.exists(dirPath.c_str())) {
-            if (!SD_MMC.mkdir(dirPath.c_str())) {
-                Serial.println("[Camera] Failed to create folder: " + dirPath);
-                return false;
-            }
-        }
-    }
-
-    File file = SD_MMC.open(path, FILE_WRITE);
-    if (!file) {
-        Serial.println("[Camera] Failed to open file for writing: " + String(path));
-        return false;
-    }
-
-    size_t written = file.write(fb->buf, fb->len);
-    file.close();
-
-    if (written != fb->len) {
-        Serial.println("[Camera] File write incomplete");
-        return false;
-    }
-
-    Serial.println("[Camera] Image saved: " + String(path));
-    return true;
+    return sdReady;
 }
 
 bool PTIT_Camera::capture() {
@@ -146,18 +64,100 @@ bool PTIT_Camera::capture() {
 }
 
 bool PTIT_Camera::captureToFile(const char* path) {
-    if (!cameraReady) {
-        Serial.println("[Camera] Camera is not initialized");
+    if (!sdReady) {
+        Serial.println("[Camera] Lỗi: Thẻ nhớ SD chưa sẵn sàng.");
         return false;
     }
 
-    camera_fb_t* fb = esp_camera_fb_get();
-    if (!fb) {
-        Serial.println("[Camera] Failed to capture frame");
+    // Đảm bảo kênh MUX đang trỏ vào Camera và cổng Serial2 đang mở ở baudrate 115200
+    selectCamera();
+    delay(100);
+
+    // Dọn dẹp bộ nhớ đệm
+    while(Serial2.available()) Serial2.read();
+
+    // 1. Gửi lệnh CAPTURE
+    Serial.println("[Camera] Đang gửi lệnh chụp ảnh tới ESP32-CAM...");
+    Serial2.println("CAPTURE");
+
+    // 2. Chờ ESP32-CAM phản hồi về SIZE
+    String response = "";
+    long startTime = millis();
+    bool sizeReceived = false;
+    long imageSize = 0;
+
+    while (millis() - startTime < 5000) {
+        if (Serial2.available()) {
+            response = Serial2.readStringUntil('\n');
+            response.trim();
+            if (response.startsWith("SIZE:")) {
+                imageSize = response.substring(5).toInt();
+                sizeReceived = true;
+                break;
+            }
+        }
+        delay(10);
+    }
+
+    if (!sizeReceived || imageSize <= 0) {
+        Serial.println("[Camera] Lỗi: Không nhận được phản hồi kích thước từ ESP32-CAM.");
         return false;
     }
 
-    bool ok = saveFrameToSd(fb, path);
-    esp_camera_fb_return(fb);
-    return ok;
+    Serial.printf("[Camera] ESP32-CAM phản hồi kích thước ảnh: %ld bytes\n", imageSize);
+
+    // 3. Tạo thư mục nếu chưa có
+    String filePath = path;
+    int lastSlash = filePath.lastIndexOf('/');
+    if (lastSlash > 0) {
+        String dirPath = filePath.substring(0, lastSlash);
+        if (!SD_MMC.exists(dirPath.c_str())) {
+            if (!SD_MMC.mkdir(dirPath.c_str())) {
+                Serial.println("[Camera] Lỗi: Không thể tạo thư mục " + dirPath);
+                return false;
+            }
+        }
+    }
+
+    // 4. Mở file để ghi
+    File file = SD_MMC.open(path, FILE_WRITE);
+    if (!file) {
+        Serial.println("[Camera] Lỗi: Không thể tạo file " + String(path));
+        return false;
+    }
+
+    // 5. Báo cho ESP32-CAM biết OBC đã sẵn sàng nhận dữ liệu
+    Serial2.println("OK");
+    Serial.println("[Camera] Đang tải dữ liệu ảnh từ ESP32-CAM...");
+
+    // 6. Nhận dữ liệu raw từ UART và ghi trực tiếp vào thẻ nhớ
+    long receivedBytes = 0;
+    startTime = millis();
+    uint8_t buf[256];
+
+    while (receivedBytes < imageSize && (millis() - startTime < 15000)) {
+        if (Serial2.available()) {
+            int bytesToRead = Serial2.available();
+            if (bytesToRead > sizeof(buf)) bytesToRead = sizeof(buf);
+            
+            int bytesRead = Serial2.readBytes(buf, bytesToRead);
+            file.write(buf, bytesRead);
+            receivedBytes += bytesRead;
+            
+            // Reset timeout mỗi khi nhận được dữ liệu
+            startTime = millis();
+        }
+    }
+
+    file.close();
+
+    // 7. Hoàn tất
+    if (receivedBytes == imageSize) {
+        Serial.println("[Camera] Lưu ảnh thành công: " + String(path));
+        Serial2.println("DONE"); // Báo ESP32-CAM kết thúc
+        return true;
+    } else {
+        Serial.printf("[Camera] Lỗi: Chỉ nhận được %ld/%ld bytes. Timeout!\n", receivedBytes, imageSize);
+        return false;
+    }
 }
